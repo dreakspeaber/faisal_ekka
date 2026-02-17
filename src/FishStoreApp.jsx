@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from 'react';
-import { Package, DollarSign, Users, ShoppingCart, TrendingUp, Truck, Plus, Trash2, ArrowRight, Save, Activity, Settings, Clock, List, Filter, CheckCircle, Clock3, User, Wallet, Eye, EyeOff, Edit2, XCircle, LogOut, Bell, Phone } from 'lucide-react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { Package, DollarSign, Users, ShoppingCart, TrendingUp, Truck, Plus, Trash2, ArrowRight, Save, Activity, Settings, Clock, List, Filter, CheckCircle, Clock3, User, Wallet, Eye, EyeOff, Edit2, XCircle, LogOut, Bell, Phone, IndianRupee, Pencil, ChevronDown, ChevronRight } from 'lucide-react';
+import { groupSalesByCustomer, detectCustomerType } from './fishStore/utils/salesUtils';
 
 // --- Components ---
 
@@ -30,6 +31,19 @@ const Button = ({ children, onClick, variant = "primary", className = "", disabl
   );
 };
 
+function CustomerTypeBadge({ type }) {
+  const styles = {
+    'Walk-in': 'bg-slate-100 text-slate-700',
+    Hotel: 'bg-amber-100 text-amber-800',
+    Wholesale: 'bg-indigo-100 text-indigo-800',
+  };
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${styles[type || 'Walk-in']}`}>
+      {type || 'Walk-in'}
+    </span>
+  );
+}
+
 const Input = ({ label, type = "text", value, onChange, placeholder, className = "", step, helperText, readOnly = false }) => (
   <div className={`flex flex-col gap-1 ${className}`}>
     {label && <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">{label}</label>}
@@ -45,6 +59,8 @@ const Input = ({ label, type = "text", value, onChange, placeholder, className =
     {helperText && <span className="text-xs text-slate-400">{helperText}</span>}
   </div>
 );
+
+const CLIENT_CATEGORIES = ['retail', 'wholesale', 'hotels', 'walk-in'];
 
 // --- Main Application ---
 
@@ -62,10 +78,11 @@ export default function FishStoreApp({ onLogout }) {
   // Master Data State
   const [fishTypes, setFishTypes] = useState(["Mathi", "Ayila", "Chembali", "Ayikora"]);
   const [clients, setClients] = useState([
-    { id: 1, name: "Local Market Hotel" },
-    { id: 2, name: "Catering Service A" },
-    { id: 3, name: "Walk-in Customer" }
+    { id: 1, name: "Local Market Hotel", category: "hotels" },
+    { id: 2, name: "Catering Service A", category: "wholesale" },
+    { id: 3, name: "Walk-in Customer", category: "walk-in" }
   ]);
+  const CLIENT_CATEGORIES = ['retail', 'wholesale', 'hotels', 'walk-in'];
 
   // Staff Data State
   const [staffList, setStaffList] = useState([
@@ -104,10 +121,21 @@ export default function FishStoreApp({ onLogout }) {
   ]);
 
   const [sales, setSales] = useState([]);
+  const [paymentHistory, setPaymentHistory] = useState([]);
 
   // Simple daily cash controls for dashboard summary
   const [pettyCash, setPettyCash] = useState(0);
   const [dailyExpenses, setDailyExpenses] = useState(0);
+
+  // Selling price per kg per item per category: { [itemName]: { retail?, wholesale?, hotels?, 'walk-in'? } }
+  const [sellingPrices, setSellingPrices] = useState({});
+
+  const getSellingPrice = (itemName, category) => {
+    const sp = sellingPrices[itemName];
+    if (!sp) return null;
+    if (typeof sp === 'number') return sp; // backward compat
+    return sp[category] ?? sp['walk-in'] ?? null;
+  };
 
   // --- Calculations ---
 
@@ -169,7 +197,8 @@ export default function FishStoreApp({ onLogout }) {
       if (stock[sale.itemName]) {
         const w = parseFloat(sale.weight);
         const p = parseFloat(sale.price);
-        const totalSale = w * p;
+        const totalSale = sale.finalAmount ?? w * p;
+        const amountPending = sale.amountPending ?? (sale.status === 'Pending' ? totalSale : sale.status === 'Partial' ? totalSale - (sale.amountPaid || 0) : 0);
 
         stock[sale.itemName].weight -= w;
         stock[sale.itemName].totalValue -= (w * stock[sale.itemName].avgCost);
@@ -177,8 +206,8 @@ export default function FishStoreApp({ onLogout }) {
         // Analytics
         stock[sale.itemName].soldWeight += w;
         stock[sale.itemName].soldValue += totalSale;
-        if (sale.status === 'Pending') {
-          stock[sale.itemName].pendingValue += totalSale;
+        if (sale.status === 'Pending' || sale.status === 'Partial') {
+          stock[sale.itemName].pendingValue += amountPending;
         }
       }
     });
@@ -427,6 +456,36 @@ export default function FishStoreApp({ onLogout }) {
 
   const Dashboard = () => {
     const [showDetailed, setShowDetailed] = useState(false);
+    const [sellingPriceModalItem, setSellingPriceModalItem] = useState(null);
+    const [sellingPriceInputs, setSellingPriceInputs] = useState({ retail: '', wholesale: '', hotels: '', 'walk-in': '' });
+
+    const openSellingPriceModal = (itemName) => {
+      setSellingPriceModalItem(itemName);
+      const sp = sellingPrices[itemName];
+      const inputs = { retail: '', wholesale: '', hotels: '', 'walk-in': '' };
+      if (sp && typeof sp === 'object') {
+        CLIENT_CATEGORIES.forEach(cat => { inputs[cat] = sp[cat] != null ? String(sp[cat]) : ''; });
+      } else if (sp != null) {
+        inputs['walk-in'] = String(sp); // backward compat
+      }
+      setSellingPriceInputs(inputs);
+    };
+    const closeSellingPriceModal = () => {
+      setSellingPriceModalItem(null);
+      setSellingPriceInputs({ retail: '', wholesale: '', hotels: '', 'walk-in': '' });
+    };
+    const saveSellingPrice = () => {
+      if (!sellingPriceModalItem) return;
+      const next = {};
+      CLIENT_CATEGORIES.forEach(cat => {
+        const num = parseFloat(sellingPriceInputs[cat]);
+        if (!Number.isNaN(num) && num >= 0) next[cat] = num;
+      });
+      if (Object.keys(next).length > 0) {
+        setSellingPrices(prev => ({ ...prev, [sellingPriceModalItem]: next }));
+      }
+      closeSellingPriceModal();
+    };
 
     const totalStockWeight = Object.values(inventory).reduce((acc, curr) => acc + Math.max(0, curr.weight), 0);
     const totalStockValue = Object.values(inventory).reduce((acc, curr) => acc + Math.max(0, curr.totalValue), 0);
@@ -435,8 +494,12 @@ export default function FishStoreApp({ onLogout }) {
     // Detailed Metrics
     const totalSoldWeight = sales.reduce((acc, curr) => acc + parseFloat(curr.weight), 0);
     const totalPending = sales
-      .filter(s => s.status === 'Pending')
-      .reduce((acc, curr) => acc + (parseFloat(curr.price) * parseFloat(curr.weight)), 0);
+      .filter(s => s.status === 'Pending' || s.status === 'Partial')
+      .reduce((acc, curr) => {
+        const total = curr.finalAmount ?? parseFloat(curr.price) * parseFloat(curr.weight);
+        const pending = curr.amountPending ?? (curr.status === 'Partial' ? total - (curr.amountPaid || 0) : total);
+        return acc + pending;
+      }, 0);
     const totalReceived = totalRevenue - totalPending;
 
     // Salary & advance flowing from staff transactions
@@ -664,8 +727,10 @@ export default function FishStoreApp({ onLogout }) {
                     <th className="px-4 py-3">Direct Cost</th>
                     <th className="px-4 py-3">Overhead</th>
                     <th className="px-4 py-3 font-bold bg-slate-100">Eff. Cost</th>
-                    <th className="px-4 py-3 rounded-r-lg">Stock Value</th>
+                    <th className="px-4 py-3">Selling Price</th>
+                    <th className="px-4 py-3">Stock Value</th>
                     {showDetailed && <th className="px-4 py-3 text-orange-600">Pending ₹</th>}
+                    <th className="px-4 py-3 rounded-r-lg w-24"></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -685,23 +750,60 @@ export default function FishStoreApp({ onLogout }) {
                           <td className="px-4 py-3 text-slate-500">₹{directCost.toFixed(2)}</td>
                           <td className="px-4 py-3 text-slate-400 text-xs">+₹{storeOverheadPerKg.toFixed(2)}</td>
                           <td className="px-4 py-3 font-bold bg-blue-50 text-blue-800">₹{data.avgCost.toFixed(2)}</td>
+                          <td className="px-4 py-3 text-slate-600">
+                            {(() => {
+                              const sp = sellingPrices[name];
+                              const display = typeof sp === 'number' ? sp : (sp && typeof sp === 'object' ? (sp['walk-in'] ?? sp.retail ?? sp.wholesale ?? sp.hotels) : null);
+                              return display != null ? (
+                                <span className="font-medium text-emerald-700">₹{Number(display).toFixed(2)}<span className="text-slate-400 text-xs">/kg</span></span>
+                              ) : (
+                                <span className="text-slate-400">—</span>
+                              );
+                            })()}
+                          </td>
                           <td className="px-4 py-3 text-slate-500">₹{Math.max(0, data.totalValue).toFixed(2)}</td>
                           {showDetailed && (
                               <td className="px-4 py-3 text-orange-600 font-medium">
                                   {data.pendingValue > 0 ? `₹${data.pendingValue.toFixed(2)}` : '-'}
                               </td>
                           )}
+                          <td className="px-4 py-3">
+                            <Button variant="outline" className="text-xs py-1.5 px-2 gap-1" onClick={() => openSellingPriceModal(name)} title="Set selling price">
+                              <IndianRupee size={14} /><Pencil size={12} /> Set Price
+                            </Button>
+                          </td>
                         </tr>
                      )
                   })}
                   {Object.keys(inventory).length === 0 && (
-                    <tr><td colSpan={showDetailed ? 8 : 6} className="text-center py-4 text-slate-400">No inventory yet</td></tr>
+                    <tr><td colSpan={showDetailed ? 10 : 8} className="text-center py-4 text-slate-400">No inventory yet</td></tr>
                   )}
                 </tbody>
               </table>
             </div>
           </Card>
         </div>
+
+        {sellingPriceModalItem && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={closeSellingPriceModal}>
+            <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
+              <h3 className="text-lg font-bold text-slate-800 mb-1">Set Selling Price</h3>
+              <p className="text-sm text-slate-500 mb-4">Price per kg for <strong>{sellingPriceModalItem}</strong> by category</p>
+              <div className="space-y-3">
+                {CLIENT_CATEGORIES.map(cat => (
+                  <Input key={cat} label={`${cat} (₹/kg)`} type="number" step="0.01" min="0" value={sellingPriceInputs[cat]} onChange={e => setSellingPriceInputs(prev => ({ ...prev, [cat]: e.target.value }))} placeholder="e.g. 150" />
+                ))}
+              </div>
+              {inventory[sellingPriceModalItem] && (
+                <p className="mt-2 text-xs text-slate-400">Effective cost: ₹{inventory[sellingPriceModalItem].avgCost.toFixed(2)}/kg</p>
+              )}
+              <div className="flex gap-2 mt-6">
+                <Button variant="secondary" className="flex-1" onClick={closeSellingPriceModal}>Cancel</Button>
+                <Button variant="primary" className="flex-1" onClick={saveSellingPrice}>Save</Button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   };
@@ -779,6 +881,56 @@ export default function FishStoreApp({ onLogout }) {
       }));
     };
 
+    const updateEditItemField = (id, field, value) => {
+      if (!editingShipment) return;
+      setEditingShipment(prev => ({
+        ...prev,
+        items: (prev.items || []).map(item => item.id === id ? { ...item, [field]: value } : item)
+      }));
+    };
+
+    const updateEditExpenseField = (id, field, value) => {
+      if (!editingShipment) return;
+      setEditingShipment(prev => ({
+        ...prev,
+        expenses: (prev.expenses || []).map(exp => exp.id === id ? { ...exp, [field]: value } : exp)
+      }));
+    };
+
+    const addEditItem = () => {
+      if (!editingShipment || !tempItem.name || !tempItem.weight || !tempItem.cost) return;
+      setEditingShipment(prev => ({
+        ...prev,
+        items: [...(prev.items || []), { ...tempItem, id: Date.now() }]
+      }));
+      setTempItem({ name: "", weight: "", cost: "" });
+    };
+
+    const removeEditItem = (itemId) => {
+      if (!editingShipment) return;
+      setEditingShipment(prev => ({
+        ...prev,
+        items: (prev.items || []).filter(item => item.id !== itemId)
+      }));
+    };
+
+    const addEditExpense = () => {
+      if (!editingShipment || !tempExpense.type || !tempExpense.amount) return;
+      setEditingShipment(prev => ({
+        ...prev,
+        expenses: [...(prev.expenses || []), { ...tempExpense, id: Date.now() }]
+      }));
+      setTempExpense({ type: "", amount: "" });
+    };
+
+    const removeEditExpense = (expenseId) => {
+      if (!editingShipment) return;
+      setEditingShipment(prev => ({
+        ...prev,
+        expenses: (prev.expenses || []).filter(exp => exp.id !== expenseId)
+      }));
+    };
+
     const finalizeShipment = () => {
       const shipmentName = newShipment.supplier.trim() ? newShipment.supplier : getAutoShipmentName();
       const cleanedItems = newShipment.items.filter(
@@ -810,20 +962,30 @@ export default function FishStoreApp({ onLogout }) {
 
     const startEditShipment = (shipment) => {
       setEditingShipment({ ...shipment });
+      setTempItem({ name: "", weight: "", cost: "" });
+      setTempExpense({ type: "", amount: "" });
     };
 
     const cancelEditShipment = () => {
       setEditingShipment(null);
+      setTempItem({ name: "", weight: "", cost: "" });
+      setTempExpense({ type: "", amount: "" });
     };
 
     const saveEditShipment = () => {
       if (!editingShipment) return;
       const cleanedItems = (editingShipment.items || []).filter(
-        item => item.name && item.weight && item.cost
+        item => item.name && parseFloat(item.weight) > 0 && parseFloat(item.cost) > 0
       );
-      const updated = { ...editingShipment, items: cleanedItems };
+      const cleanedExpenses = (editingShipment.expenses || []).filter(
+        exp => exp.type && parseFloat(exp.amount) > 0
+      );
+      if (cleanedItems.length === 0) return;
+      const updated = { ...editingShipment, items: cleanedItems, expenses: cleanedExpenses };
       setShipments(shipments.map(s => s.id === updated.id ? updated : s));
       setEditingShipment(null);
+      setTempItem({ name: "", weight: "", cost: "" });
+      setTempExpense({ type: "", amount: "" });
     };
 
     // Live Calculation
@@ -997,8 +1159,12 @@ export default function FishStoreApp({ onLogout }) {
                     <span className="text-white font-mono">{totalWt} kg</span>
                   </div>
                   <div className="flex justify-between text-sm text-slate-400">
-                    <span>Direct Overhead</span>
+                    <span>Total Direct Expenses</span>
                     <span className="text-white font-mono">₹{totalExp.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm text-yellow-400 font-medium">
+                    <span>Shared Expense per KG</span>
+                    <span className="font-mono">₹{directOverheadPerKg.toFixed(2)}</span>
                   </div>
                   <div className="flex justify-between text-sm text-purple-300">
                     <span>Store Overhead</span>
@@ -1034,60 +1200,199 @@ export default function FishStoreApp({ onLogout }) {
            <Button onClick={startNewShipment}><Plus size={18} /> New Shipment</Button>
         </div>
 
-        {editingShipment && (
-          <Card className="p-4">
-            <div className="flex justify-between items-center mb-3">
-              <h3 className="font-semibold text-slate-800 flex items-center gap-2">
-                <Edit2 size={16} /> Edit Shipment – {editingShipment.supplier}
-              </h3>
-              <button
-                className="text-slate-500 hover:text-slate-800 text-sm flex items-center gap-1"
-                onClick={cancelEditShipment}
-              >
-                <XCircle size={14} /> Close
-              </button>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <Input
-                label="Supplier / Name"
-                value={editingShipment.supplier}
-                onChange={e => setEditingShipment({ ...editingShipment, supplier: e.target.value })}
-              />
-              <div>
-                <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Status</label>
-                <select
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg outline-none bg-white"
-                  value={editingShipment.status}
-                  onChange={e => setEditingShipment({ ...editingShipment, status: e.target.value })}
+        {editingShipment && (() => {
+          const editTotalWt = (editingShipment.items || []).reduce((s, i) => s + parseFloat(i.weight || 0), 0);
+          const editTotalExp = (editingShipment.expenses || []).reduce((s, i) => s + parseFloat(i.amount || 0), 0);
+          const editSharedExpensePerKg = editTotalWt > 0 ? editTotalExp / editTotalWt : 0;
+          return (
+            <Card className="p-4">
+              <div className="flex justify-between items-center mb-3">
+                <h3 className="font-semibold text-slate-800 flex items-center gap-2">
+                  <Edit2 size={16} /> Edit Shipment – {editingShipment.supplier}
+                </h3>
+                <button
+                  className="text-slate-500 hover:text-slate-800 text-sm flex items-center gap-1"
+                  onClick={cancelEditShipment}
                 >
-                  {['In Transit', 'Delivered', 'Cancelled'].map(s => (
-                    <option key={s} value={s}>{s}</option>
-                  ))}
-                </select>
+                  <XCircle size={14} /> Close
+                </button>
               </div>
-              <Input
-                label="Tracking ID"
-                value={editingShipment.trackingId || ''}
-                onChange={e => setEditingShipment({ ...editingShipment, trackingId: e.target.value })}
-              />
-              <Input
-                label="Notes"
-                value={editingShipment.notes || ''}
-                onChange={e => setEditingShipment({ ...editingShipment, notes: e.target.value })}
-              />
-            </div>
-            <div className="mt-4 flex justify-end gap-2">
-              <Button variant="secondary" onClick={cancelEditShipment}>Cancel</Button>
-              <Button variant="primary" onClick={saveEditShipment}>Save Changes</Button>
-            </div>
-          </Card>
-        )}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                <Input
+                  label="Supplier / Name"
+                  value={editingShipment.supplier}
+                  onChange={e => setEditingShipment({ ...editingShipment, supplier: e.target.value })}
+                />
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Status</label>
+                  <select
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg outline-none bg-white"
+                    value={editingShipment.status}
+                    onChange={e => setEditingShipment({ ...editingShipment, status: e.target.value })}
+                  >
+                    {['In Transit', 'Delivered', 'Cancelled'].map(s => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </div>
+                <Input
+                  label="Tracking ID"
+                  value={editingShipment.trackingId || ''}
+                  onChange={e => setEditingShipment({ ...editingShipment, trackingId: e.target.value })}
+                />
+                <Input
+                  label="Notes"
+                  value={editingShipment.notes || ''}
+                  onChange={e => setEditingShipment({ ...editingShipment, notes: e.target.value })}
+                />
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-semibold text-slate-700 text-sm">Fish Items</h4>
+                    <div className="flex gap-2 items-end">
+                      <select
+                        className="px-2 py-1.5 text-sm border border-slate-300 rounded-lg outline-none bg-white"
+                        value={tempItem.name}
+                        onChange={e => setTempItem({ ...tempItem, name: e.target.value })}
+                      >
+                        <option value="">Add item...</option>
+                        {fishTypes.map(f => (
+                          <option key={f} value={f}>{f}</option>
+                        ))}
+                      </select>
+                      <input
+                        type="number"
+                        className="w-16 px-2 py-1.5 text-sm border border-slate-300 rounded-lg"
+                        placeholder="kg"
+                        value={tempItem.weight}
+                        onChange={e => setTempItem({ ...tempItem, weight: e.target.value })}
+                      />
+                      <input
+                        type="number"
+                        className="w-20 px-2 py-1.5 text-sm border border-slate-300 rounded-lg"
+                        placeholder="₹"
+                        value={tempItem.cost}
+                        onChange={e => setTempItem({ ...tempItem, cost: e.target.value })}
+                      />
+                      <Button variant="secondary" className="!px-2 !py-1" onClick={addEditItem} disabled={!tempItem.name || !tempItem.weight || !tempItem.cost}>
+                        <Plus size={14} />
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="bg-slate-50 rounded-lg p-3 space-y-2 border border-slate-100 max-h-48 overflow-auto">
+                    {(editingShipment.items || []).map(item => (
+                      <div key={item.id} className="grid grid-cols-12 gap-2 items-center text-sm">
+                        <div className="col-span-4 font-medium text-slate-800">{item.name}</div>
+                        <div className="col-span-2">
+                          <input
+                            type="number"
+                            className="w-full px-2 py-1 border border-slate-300 rounded text-sm bg-white"
+                            placeholder="kg"
+                            value={item.weight}
+                            onChange={e => updateEditItemField(item.id, 'weight', e.target.value)}
+                          />
+                        </div>
+                        <div className="col-span-2">
+                          <input
+                            type="number"
+                            className="w-full px-2 py-1 border border-slate-300 rounded text-sm bg-white"
+                            placeholder="₹"
+                            value={item.cost}
+                            onChange={e => updateEditItemField(item.id, 'cost', e.target.value)}
+                          />
+                        </div>
+                        <div className="col-span-4 flex justify-end">
+                          <button
+                            onClick={() => removeEditItem(item.id)}
+                            className="text-red-500 hover:text-red-700 p-1"
+                            title="Remove item"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {(editingShipment.items || []).length === 0 && (
+                      <p className="text-slate-400 text-xs italic">No items. Add at least one item.</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-semibold text-slate-700 text-sm">Expenses</h4>
+                    <div className="flex gap-2 items-end">
+                      <input
+                        type="text"
+                        className="w-24 px-2 py-1.5 text-sm border border-slate-300 rounded-lg"
+                        placeholder="Type"
+                        value={tempExpense.type}
+                        onChange={e => setTempExpense({ ...tempExpense, type: e.target.value })}
+                      />
+                      <input
+                        type="number"
+                        className="w-20 px-2 py-1.5 text-sm border border-slate-300 rounded-lg"
+                        placeholder="₹"
+                        value={tempExpense.amount}
+                        onChange={e => setTempExpense({ ...tempExpense, amount: e.target.value })}
+                      />
+                      <Button variant="secondary" className="!px-2 !py-1" onClick={addEditExpense} disabled={!tempExpense.type || !tempExpense.amount}>
+                        <Plus size={14} />
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="bg-orange-50 rounded-lg p-3 space-y-2 border border-orange-100 max-h-48 overflow-auto">
+                    {(editingShipment.expenses || []).map(exp => (
+                      <div key={exp.id} className="flex gap-2 items-center text-sm text-orange-800">
+                        <input
+                          type="text"
+                          className="flex-1 px-2 py-1 border border-orange-200 rounded text-sm bg-white"
+                          value={exp.type}
+                          onChange={e => updateEditExpenseField(exp.id, 'type', e.target.value)}
+                        />
+                        <input
+                          type="number"
+                          className="w-20 px-2 py-1 border border-orange-200 rounded text-sm bg-white"
+                          value={exp.amount}
+                          onChange={e => updateEditExpenseField(exp.id, 'amount', e.target.value)}
+                        />
+                        <button
+                          onClick={() => removeEditExpense(exp.id)}
+                          className="text-red-500 hover:text-red-700 p-1"
+                          title="Remove expense"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    ))}
+                    {(editingShipment.expenses || []).length === 0 && (
+                      <p className="text-slate-400 text-xs italic">No expenses</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mb-4 p-3 bg-blue-50 border border-blue-100 rounded-lg flex justify-between items-center">
+                <span className="text-sm font-semibold text-blue-800">Shared Expense per KG</span>
+                <span className="font-mono font-bold text-blue-900">₹{editSharedExpensePerKg.toFixed(2)}</span>
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <Button variant="secondary" onClick={cancelEditShipment}>Cancel</Button>
+                <Button variant="primary" onClick={saveEditShipment} disabled={(editingShipment.items || []).filter(i => i.name && i.weight && i.cost).length === 0}>Save Changes</Button>
+              </div>
+            </Card>
+          );
+        })()}
 
         <div className="grid gap-4">
           {shipments.map(shipment => {
              const sWeight = shipment.items.reduce((a,b) => a + parseFloat(b.weight), 0);
              const sCost = shipment.items.reduce((a,b) => a + parseFloat(b.cost), 0);
-             const sExp = shipment.expenses.reduce((a,b) => a + parseFloat(b.amount), 0);
+             const sExp = (shipment.expenses || []).reduce((a,b) => a + parseFloat(b.amount), 0);
+             const sSharedPerKg = sWeight > 0 ? sExp / sWeight : 0;
 
              return (
                <Card key={shipment.id} className="p-4 flex flex-col md:flex-row justify-between items-center gap-4 hover:shadow-md transition-shadow">
@@ -1110,10 +1415,14 @@ export default function FishStoreApp({ onLogout }) {
                    </div>
                  </div>
                  
-                 <div className="flex gap-8 text-sm items-center">
+                 <div className="flex flex-wrap gap-6 md:gap-8 text-sm items-center">
                    <div>
                      <span className="block text-slate-500 text-xs uppercase">Stock Added</span>
                      <span className="font-medium">{sWeight} kg</span>
+                   </div>
+                   <div>
+                     <span className="block text-slate-500 text-xs uppercase">Shared Exp/kg</span>
+                     <span className="font-medium text-amber-700">₹{sSharedPerKg.toFixed(2)}</span>
                    </div>
                    <div>
                      <span className="block text-slate-500 text-xs uppercase">Total Eff. Cost</span>
@@ -1167,21 +1476,140 @@ export default function FishStoreApp({ onLogout }) {
   const SalesPoint = () => {
     const [newSale, setNewSale] = useState({ 
       clientName: "", 
+      clientCategory: "walk-in",
       itemName: "", 
       weight: "", 
       price: "", 
       status: "Paid",
       billNumber: "",
       mobile: "",
-      paymentMode: "Cash"
+      paymentMode: "",
+      discountPercent: "",
+      discountAmount: ""
     });
+    const [partialAmount, setPartialAmount] = useState("");
     const availableItems = Object.keys(inventory);
+
+    useEffect(() => {
+      if (newSale.itemName && newSale.clientCategory) {
+        const price = getSellingPrice(newSale.itemName, newSale.clientCategory);
+        if (price != null) setNewSale(prev => ({ ...prev, price: String(price) }));
+      }
+    }, [newSale.itemName, newSale.clientCategory, sellingPrices]);
     
     // UI State
     const [isAddingClient, setIsAddingClient] = useState(false);
     const [newClientName, setNewClientName] = useState("");
+    const [newClientCategory, setNewClientCategory] = useState("walk-in");
     const [filterStatus, setFilterStatus] = useState("All");
     const [editingSale, setEditingSale] = useState(null);
+    const [payingSaleId, setPayingSaleId] = useState(null);
+    const [paymentForm, setPaymentForm] = useState({ amount: '', paymentMode: 'Cash', note: '' });
+    const [editingPaymentId, setEditingPaymentId] = useState(null);
+    const [expandedPayments, setExpandedPayments] = useState(new Set());
+    const [viewMode, setViewMode] = useState('flat');
+    const [expandedCustomers, setExpandedCustomers] = useState(new Set());
+
+    const toggleCustomerGroup = (name) => {
+      setExpandedCustomers(prev => {
+        const next = new Set(prev);
+        if (next.has(name)) next.delete(name);
+        else next.add(name);
+        return next;
+      });
+    };
+
+    const togglePaymentHistory = (saleId) => {
+      setExpandedPayments(prev => {
+        const next = new Set(prev);
+        if (next.has(saleId)) next.delete(saleId);
+        else next.add(saleId);
+        return next;
+      });
+    };
+
+    const handleAddPayment = (saleId) => {
+      const sale = sales.find(s => s.id === saleId);
+      if (!sale || !paymentForm.amount || parseFloat(paymentForm.amount) <= 0) return;
+      const paymentAmount = parseFloat(paymentForm.amount);
+      const finalAmt = sale.finalAmount ?? sale.weight * sale.price;
+      const currentPending = sale.amountPending ?? finalAmt - (sale.amountPaid || 0);
+      if (paymentAmount > currentPending) {
+        alert(`Payment amount cannot exceed pending amount of ₹${currentPending.toFixed(2)}`);
+        return;
+      }
+      const newPayment = {
+        id: Date.now(),
+        saleId,
+        date: new Date().toISOString().split('T')[0],
+        amount: paymentAmount,
+        paymentMode: paymentForm.paymentMode,
+        note: paymentForm.note || ''
+      };
+      setPaymentHistory(prev => [...prev, newPayment]);
+      const updatedAmountPaid = (sale.amountPaid || 0) + paymentAmount;
+      const updatedAmountPending = finalAmt - updatedAmountPaid;
+      let updatedStatus = updatedAmountPaid >= finalAmt ? 'Paid' : updatedAmountPaid > 0 ? 'Partial' : 'Pending';
+      setSales(prev =>
+        prev.map(s => s.id === saleId ? { ...s, amountPaid: updatedAmountPaid, amountPending: updatedAmountPending, status: updatedStatus } : s)
+      );
+      setPaymentForm({ amount: '', paymentMode: 'Cash', note: '' });
+      setPayingSaleId(null);
+    };
+
+    const handleEditPayment = (paymentId) => {
+      const payment = paymentHistory.find(p => p.id === paymentId);
+      if (payment) {
+        setPaymentForm({ amount: payment.amount.toString(), paymentMode: payment.paymentMode, note: payment.note });
+        setEditingPaymentId(paymentId);
+        setPayingSaleId(payment.saleId);
+      }
+    };
+
+    const handleUpdatePayment = () => {
+      if (!editingPaymentId || !paymentForm.amount) return;
+      const payment = paymentHistory.find(p => p.id === editingPaymentId);
+      if (!payment) return;
+      const sale = sales.find(s => s.id === payment.saleId);
+      if (!sale) return;
+      const finalAmt = sale.finalAmount ?? sale.weight * sale.price;
+      const oldAmount = parseFloat(payment.amount);
+      const newAmount = parseFloat(paymentForm.amount);
+      const difference = newAmount - oldAmount;
+      const currentPending = sale.amountPending ?? finalAmt - (sale.amountPaid || 0);
+      if (difference > currentPending) {
+        alert('Payment increase cannot exceed pending amount');
+        return;
+      }
+      setPaymentHistory(prev =>
+        prev.map(p => p.id === editingPaymentId ? { ...p, amount: newAmount, paymentMode: paymentForm.paymentMode, note: paymentForm.note } : p)
+      );
+      const updatedAmountPaid = (sale.amountPaid || 0) + difference;
+      const updatedAmountPending = finalAmt - updatedAmountPaid;
+      let updatedStatus = updatedAmountPaid >= finalAmt ? 'Paid' : updatedAmountPaid > 0 ? 'Partial' : 'Pending';
+      setSales(prev =>
+        prev.map(s => s.id === payment.saleId ? { ...s, amountPaid: updatedAmountPaid, amountPending: updatedAmountPending, status: updatedStatus } : s)
+      );
+      setPaymentForm({ amount: '', paymentMode: 'Cash', note: '' });
+      setEditingPaymentId(null);
+      setPayingSaleId(null);
+    };
+
+    const handleDeletePayment = (paymentId) => {
+      if (!confirm('Are you sure you want to delete this payment entry?')) return;
+      const payment = paymentHistory.find(p => p.id === paymentId);
+      if (!payment) return;
+      const sale = sales.find(s => s.id === payment.saleId);
+      if (!sale) return;
+      const finalAmt = sale.finalAmount ?? sale.weight * sale.price;
+      setPaymentHistory(prev => prev.filter(p => p.id !== paymentId));
+      const updatedAmountPaid = Math.max(0, (sale.amountPaid || 0) - parseFloat(payment.amount));
+      const updatedAmountPending = finalAmt - updatedAmountPaid;
+      let updatedStatus = updatedAmountPaid >= finalAmt ? 'Paid' : updatedAmountPaid > 0 ? 'Partial' : 'Pending';
+      setSales(prev =>
+        prev.map(s => s.id === payment.saleId ? { ...s, amountPaid: updatedAmountPaid, amountPending: updatedAmountPending, status: updatedStatus } : s)
+      );
+    };
 
     const getCostPrice = () => {
       if(!newSale.itemName) return 0;
@@ -1190,40 +1618,99 @@ export default function FishStoreApp({ onLogout }) {
 
     const addClient = () => {
       if(newClientName) {
-        setClients([...clients, { id: Date.now(), name: newClientName }]);
-        setNewSale({...newSale, clientName: newClientName});
+        setClients([...clients, { id: Date.now(), name: newClientName, category: newClientCategory }]);
+        setNewSale({...newSale, clientName: newClientName, clientCategory: newClientCategory});
         setNewClientName("");
+        setNewClientCategory("walk-in");
         setIsAddingClient(false);
       }
     };
 
     const handleSell = () => {
-      if (!newSale.clientName || !newSale.itemName || !newSale.weight || !newSale.price) return;
-      if (inventory[newSale.itemName].weight < parseFloat(newSale.weight)) return; 
+      if (!newSale.clientName || !newSale.itemName || !newSale.weight) {
+        alert("Please fill in Client, Fish Stock, and Weight.");
+        return;
+      }
+      const price = parseFloat(newSale.price);
+      if (!newSale.price || isNaN(price) || price <= 0) {
+        alert("Selling price not set. Go to Dashboard → Set Price for this fish and category.");
+        return;
+      }
+      const itemStock = inventory[newSale.itemName];
+      if (!itemStock || itemStock.weight < parseFloat(newSale.weight)) {
+        alert(`Insufficient stock. Available: ${itemStock?.weight?.toFixed(1) ?? 0} kg`);
+        return;
+      }
       
-      const isWalkIn = newSale.clientName.toLowerCase().includes('walk');
+      const isWalkIn = (newSale.clientCategory || newSale.clientName?.toLowerCase() || '').includes('walk');
       const isPending = newSale.status === 'Pending';
       if (isWalkIn && isPending && (!newSale.billNumber || !newSale.mobile)) {
+        alert("Bill Number and Customer Mobile are required for pending walk-in bills.");
         return;
       }
 
+      const originalAmount = parseFloat(newSale.weight) * price;
+      const discountAmt = parseFloat(newSale.discountAmount) || 0;
+      const totalAmount = Math.max(0, originalAmount - discountAmt);
+      let amountPaid = totalAmount;
+      let amountPending = 0;
+
+      if (newSale.status === 'Partial') {
+        const paid = parseFloat(partialAmount);
+        if (isNaN(paid) || paid <= 0 || paid >= totalAmount) {
+          alert(`Enter a partial amount between ₹0.01 and ₹${totalAmount.toFixed(2)}`);
+          return;
+        }
+        amountPaid = paid;
+        amountPending = totalAmount - paid;
+      } else if (newSale.status === 'Pending') {
+        amountPaid = 0;
+        amountPending = totalAmount;
+      }
+
+      const saleId = Date.now();
+      const customerType = newSale.clientCategory || detectCustomerType(newSale.clientName);
       const salePayload = { 
         ...newSale, 
-        id: Date.now(), 
+        id: saleId, 
         date: new Date().toLocaleDateString(),
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        customerType,
+        originalAmount,
+        discountAmount: discountAmt,
+        discountPercent: parseFloat(newSale.discountPercent) || 0,
+        amountPaid,
+        amountPending,
+        finalAmount: totalAmount
       };
-      setSales([...sales, salePayload]);
+
+      // Record initial payment in history for Paid/Partial
+      if (amountPaid > 0) {
+        setPaymentHistory(prev => [...prev, {
+          id: Date.now() + 1,
+          saleId,
+          date: new Date().toISOString().split('T')[0],
+          amount: amountPaid,
+          paymentMode: newSale.paymentMode || 'Cash',
+          note: 'Initial payment'
+        }]);
+      }
+
+      setSales(prev => [...prev, salePayload]);
       setNewSale({ 
         clientName: "", 
+        clientCategory: "walk-in",
         itemName: "", 
         weight: "", 
         price: "", 
         status: "Paid",
         billNumber: "",
         mobile: "",
-        paymentMode: "Cash"
+        paymentMode: "",
+        discountPercent: "",
+        discountAmount: ""
       });
+      setPartialAmount("");
     };
 
     const effectiveCost = getCostPrice();
@@ -1232,6 +1719,13 @@ export default function FishStoreApp({ onLogout }) {
     const totalProfit = profitPerKg * (parseFloat(newSale.weight) || 0);
 
     const filteredSales = sales.filter(s => filterStatus === 'All' || s.status === filterStatus);
+
+    const salesWithPending = filteredSales.map(s => {
+      const fa = s.finalAmount ?? parseFloat(s.weight) * parseFloat(s.price);
+      return { ...s, amountPending: s.amountPending ?? fa - (s.amountPaid ?? 0), finalAmount: fa };
+    });
+
+    const clientSummaries = groupSalesByCustomer(salesWithPending);
 
     const startEditSale = (sale) => {
       setEditingSale({ ...sale });
@@ -1261,16 +1755,26 @@ export default function FishStoreApp({ onLogout }) {
               <div>
                 <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Client</label>
                 {isAddingClient ? (
-                   <div className="flex gap-2">
-                     <input 
-                       autoFocus
-                       className="w-full px-3 py-2 border border-blue-500 rounded-lg outline-none"
-                       placeholder="Enter new client name"
-                       value={newClientName}
-                       onChange={e => setNewClientName(e.target.value)}
-                     />
-                     <Button onClick={addClient} variant="success">Add</Button>
-                     <Button onClick={() => setIsAddingClient(false)} variant="secondary">X</Button>
+                   <div className="space-y-3">
+                     <div className="flex gap-2">
+                       <input 
+                         autoFocus
+                         className="w-full px-3 py-2 border border-blue-500 rounded-lg outline-none"
+                         placeholder="Enter new client name"
+                         value={newClientName}
+                         onChange={e => setNewClientName(e.target.value)}
+                       />
+                       <Button onClick={addClient} variant="success">Add</Button>
+                       <Button onClick={() => setIsAddingClient(false)} variant="secondary">X</Button>
+                     </div>
+                     <div>
+                       <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Category</label>
+                       <div className="flex gap-2 flex-wrap">
+                         {CLIENT_CATEGORIES.map(cat => (
+                           <button key={cat} type="button" onClick={() => setNewClientCategory(cat)} className={`px-3 py-1 text-sm rounded-full border ${newClientCategory === cat ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300'}`}>{cat}</button>
+                         ))}
+                       </div>
+                     </div>
                    </div>
                 ) : (
                   <select 
@@ -1278,7 +1782,10 @@ export default function FishStoreApp({ onLogout }) {
                     value={newSale.clientName}
                     onChange={e => {
                       if (e.target.value === '__NEW__') setIsAddingClient(true);
-                      else setNewSale({...newSale, clientName: e.target.value});
+                      else {
+                        const client = clients.find(c => c.name === e.target.value);
+                        setNewSale({...newSale, clientName: e.target.value, clientCategory: client?.category || 'walk-in'});
+                      }
                     }}
                   >
                     <option value="">Select Client...</option>
@@ -1321,7 +1828,36 @@ export default function FishStoreApp({ onLogout }) {
 
               <div className="grid grid-cols-2 gap-4">
                 <Input label="Weight (kg)" type="number" value={newSale.weight} onChange={e => setNewSale({...newSale, weight: e.target.value})} />
-                <Input label="Selling Price (₹)" type="number" value={newSale.price} onChange={e => setNewSale({...newSale, price: e.target.value})} />
+                <Input label="Selling Price (₹/kg)" type="number" value={newSale.price} onChange={() => {}} readOnly helperText={getSellingPrice(newSale.itemName, newSale.clientCategory) == null && newSale.itemName && newSale.clientName ? "Set price in Dashboard → Set Price for this fish" : "Auto from Dashboard"} placeholder="Select client & fish" />
+              </div>
+
+              <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 space-y-3">
+                <h4 className="text-xs font-semibold text-orange-800 uppercase">Discount (Optional)</h4>
+                <div className="grid grid-cols-2 gap-4">
+                  <Input label="Discount (%)" type="number" step="0.01" value={newSale.discountPercent} onChange={e => {
+                    const p = parseFloat(e.target.value) || 0;
+                    if (p < 0 || p > 100) return;
+                    const orig = (parseFloat(newSale.weight) || 0) * (parseFloat(newSale.price) || 0);
+                    setNewSale({ ...newSale, discountPercent: e.target.value, discountAmount: (orig * p / 100).toFixed(2) });
+                  }} placeholder="0" helperText="0-100%" />
+                  <Input label="Discount Amount (₹)" type="number" step="0.01" value={newSale.discountAmount} onChange={e => {
+                    const amt = parseFloat(e.target.value) || 0;
+                    const orig = (parseFloat(newSale.weight) || 0) * (parseFloat(newSale.price) || 0);
+                    if (amt < 0 || amt > orig) return;
+                    setNewSale({ ...newSale, discountAmount: e.target.value, discountPercent: orig > 0 ? (amt / orig * 100).toFixed(2) : "" });
+                  }} placeholder="0.00" />
+                </div>
+                {newSale.weight && newSale.price && (
+                  <div className="text-sm space-y-1 pt-2 border-t border-orange-200">
+                    <div className="flex justify-between text-slate-600"><span>Original:</span><span className="font-mono">₹{((parseFloat(newSale.weight) || 0) * (parseFloat(newSale.price) || 0)).toFixed(2)}</span></div>
+                    {(parseFloat(newSale.discountAmount) || 0) > 0 && (
+                      <>
+                        <div className="flex justify-between text-orange-600"><span>Discount:</span><span className="font-mono">-₹{parseFloat(newSale.discountAmount).toFixed(2)}</span></div>
+                        <div className="flex justify-between text-slate-800 font-bold pt-1 border-t border-orange-200"><span>Final:</span><span className="font-mono">₹{(((parseFloat(newSale.weight) || 0) * (parseFloat(newSale.price) || 0)) - (parseFloat(newSale.discountAmount) || 0)).toFixed(2)}</span></div>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1330,13 +1866,40 @@ export default function FishStoreApp({ onLogout }) {
                    {['Paid', 'Pending', 'Partial'].map(status => (
                      <button
                       key={status}
-                      onClick={() => setNewSale({...newSale, status})}
+                      type="button"
+                      onClick={() => {
+                        setNewSale({...newSale, status});
+                        if (status !== 'Partial') setPartialAmount("");
+                      }}
                       className={`px-3 py-1 text-sm rounded-full border ${newSale.status === status ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300'}`}
                      >
                        {status}
                      </button>
                    ))}
                 </div>
+                {newSale.status === 'Partial' && (
+                  <div className="mt-3">
+                    <Input
+                      label="Amount paid now (₹)"
+                      type="number"
+                      step="0.01"
+                      value={partialAmount}
+                      onChange={e => setPartialAmount(e.target.value)}
+                      placeholder={newSale.weight && newSale.price ? (() => {
+                        const orig = (parseFloat(newSale.weight) || 0) * (parseFloat(newSale.price) || 0);
+                        const disc = parseFloat(newSale.discountAmount) || 0;
+                        const total = Math.max(0, orig - disc);
+                        return `Max: ₹${total.toFixed(2)}`;
+                      })() : "Enter after Weight & Price"}
+                      helperText={newSale.weight && newSale.price ? (() => {
+                        const orig = (parseFloat(newSale.weight) || 0) * (parseFloat(newSale.price) || 0);
+                        const disc = parseFloat(newSale.discountAmount) || 0;
+                        const total = Math.max(0, orig - disc);
+                        return `Enter amount received. Total: ₹${total.toFixed(2)}`;
+                      })() : "Fill Weight and Selling Price to see total"}
+                    />
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1416,23 +1979,178 @@ export default function FishStoreApp({ onLogout }) {
 
         {/* Bottom Section: Sales History List */}
         <div className="space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-4">
                 <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
                     <List className="text-slate-600" /> Sales History
                 </h2>
-                <div className="flex gap-2 bg-white p-1 rounded-lg border border-slate-200">
-                    {['All', 'Paid', 'Pending'].map(f => (
-                        <button
-                            key={f}
-                            onClick={() => setFilterStatus(f)}
-                            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${filterStatus === f ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
-                        >
-                            {f}
-                        </button>
-                    ))}
+                <div className="flex items-center gap-3">
+                    <div className="flex gap-2 bg-white p-1 rounded-lg border border-slate-200">
+                        <button type="button" onClick={() => setViewMode('flat')} className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${viewMode === 'flat' ? 'bg-slate-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>Flat</button>
+                        <button type="button" onClick={() => setViewMode('grouped')} className={`px-3 py-1 text-xs font-medium rounded-md transition-colors flex items-center gap-1 ${viewMode === 'grouped' ? 'bg-slate-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}><Users size={12} /> Group by Customer</button>
+                    </div>
+                    <div className="flex gap-2 bg-white p-1 rounded-lg border border-slate-200">
+                        {['All', 'Paid', 'Pending', 'Partial'].map(f => (
+                            <button key={f} type="button" onClick={() => setFilterStatus(f)} className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${filterStatus === f ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>{f}</button>
+                        ))}
+                    </div>
                 </div>
             </div>
 
+            {/* Client Payments Summary - store of client-wise totals */}
+            <Card className="p-4 border border-slate-200">
+                <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3 flex items-center gap-2"><Wallet size={14} /> Client Payments Summary</h4>
+                {clientSummaries.length === 0 ? (
+                    <p className="text-slate-400 italic text-sm">No sales to summarize</p>
+                ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {clientSummaries.map(g => (
+                            <div key={g.clientName} className="flex justify-between items-center p-3 bg-slate-50 rounded-lg border border-slate-100">
+                                <div className="flex items-center gap-2">
+                                    <span className="font-medium text-slate-800">{g.clientName}</span>
+                                    <CustomerTypeBadge type={g.customerType} />
+                                </div>
+                                <div className="text-right text-sm">
+                                    <div className="text-slate-600">Total: <span className="font-mono font-medium">₹{g.totalAmount.toFixed(2)}</span></div>
+                                    {g.totalPending > 0 && (
+                                        <div className="text-red-600 font-medium">Remaining: ₹{g.totalPending.toFixed(2)}</div>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </Card>
+
+            {viewMode === 'grouped' ? (
+              <div className="space-y-3">
+                {clientSummaries.length === 0 ? (
+                  <Card className="p-8 text-center text-slate-400 italic">No sales match the current filters.</Card>
+                ) : (
+                  clientSummaries.map(group => {
+                    const isExpanded = expandedCustomers.has(group.clientName);
+                    return (
+                      <Card key={group.clientName} className="overflow-hidden border border-slate-200">
+                        <button type="button" className="w-full flex items-center justify-between p-4 text-left hover:bg-slate-50 transition-colors" onClick={() => toggleCustomerGroup(group.clientName)}>
+                          <div className="flex items-center gap-3">
+                            {isExpanded ? <ChevronDown size={18} className="text-slate-500" /> : <ChevronRight size={18} className="text-slate-500" />}
+                            <span className="font-semibold text-slate-800">{group.clientName}</span>
+                            <CustomerTypeBadge type={group.customerType} />
+                          </div>
+                          <div className="flex items-center gap-6 text-sm">
+                            <span className="text-slate-500">{group.sales.length} transaction{group.sales.length !== 1 ? 's' : ''}</span>
+                            <span className="font-medium text-slate-800">₹{group.totalAmount.toFixed(2)} total</span>
+                            {group.totalPending > 0 && <span className="font-medium text-red-600">₹{group.totalPending.toFixed(2)} pending</span>}
+                          </div>
+                        </button>
+                        {isExpanded && (
+                          <div className="border-t border-slate-100 bg-slate-50/50">
+                            <table className="w-full text-sm text-left">
+                              <thead className="bg-slate-100/80 text-slate-600 uppercase text-xs">
+                                <tr>
+                                  <th className="px-4 py-2">Date</th>
+                                  <th className="px-4 py-2">Item</th>
+                                  <th className="px-4 py-2">Bill No</th>
+                                  <th className="px-4 py-2">Weight</th>
+                                  <th className="px-4 py-2">Price/kg</th>
+                                  <th className="px-4 py-2">Final Total</th>
+                                  <th className="px-4 py-2">Paid</th>
+                                  <th className="px-4 py-2">Pending</th>
+                                  <th className="px-4 py-2 text-right">Status</th>
+                                  <th className="px-4 py-2 text-right">Actions</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100">
+                                {group.sales.slice().reverse().map(sale => {
+                                  const finalAmt = sale.finalAmount ?? sale.weight * sale.price;
+                                  const amountPaid = sale.amountPaid ?? 0;
+                                  const amountPending = sale.amountPending ?? finalAmt;
+                                  const salePayments = paymentHistory.filter(p => p.saleId === sale.id);
+                                  const isPayExpanded = expandedPayments.has(sale.id);
+                                  const isPaying = payingSaleId === sale.id;
+                                  return (
+                                    <React.Fragment key={sale.id}>
+                                      <tr className="hover:bg-white/80">
+                                        <td className="px-4 py-2 text-slate-500">{sale.date}</td>
+                                        <td className="px-4 py-2 text-slate-600">{sale.itemName}</td>
+                                        <td className="px-4 py-2">{sale.billNumber || '-'}</td>
+                                        <td className="px-4 py-2">{sale.weight} kg</td>
+                                        <td className="px-4 py-2">₹{sale.price}</td>
+                                        <td className="px-4 py-2 font-bold text-slate-800">₹{finalAmt.toFixed(2)}</td>
+                                        <td className="px-4 py-2 text-green-600 font-medium">₹{amountPaid.toFixed(2)}</td>
+                                        <td className="px-4 py-2 text-red-600 font-medium">₹{amountPending.toFixed(2)}</td>
+                                        <td className="px-4 py-2 text-right">
+                                          <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${sale.status === 'Paid' ? 'bg-green-100 text-green-700' : sale.status === 'Pending' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700'}`}>{sale.status}</span>
+                                        </td>
+                                        <td className="px-4 py-2 text-right">
+                                          <div className="flex items-center justify-end gap-2">
+                                            {sale.status !== 'Paid' && (
+                                              <Button variant="success" className="text-xs px-2 py-1" onClick={() => { setPayingSaleId(sale.id); setPaymentForm({ amount: amountPending.toFixed(2), paymentMode: 'Cash', note: '' }); }}>Pay</Button>
+                                            )}
+                                            <button type="button" onClick={() => togglePaymentHistory(sale.id)} className="text-blue-600 hover:text-blue-800 text-xs px-2 py-1">{isPayExpanded ? 'Hide' : 'View'} Payments ({salePayments.length})</button>
+                                            <button type="button" className="text-slate-500 hover:text-blue-600 p-1" onClick={() => startEditSale(sale)} title="Edit"><Edit2 size={14} /></button>
+                                          </div>
+                                        </td>
+                                      </tr>
+                                      {isPaying && (
+                                        <tr className="bg-blue-50">
+                                          <td colSpan="10" className="px-4 py-4">
+                                            <div className="bg-white rounded-lg p-4 border border-blue-200">
+                                              <h4 className="font-semibold text-slate-800 mb-3">{editingPaymentId ? 'Edit Payment' : 'Record Payment'}</h4>
+                                              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                                <Input label="Amount (₹)" type="number" step="0.01" value={paymentForm.amount} onChange={e => setPaymentForm({ ...paymentForm, amount: e.target.value })} />
+                                                <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Payment Mode</label><select className="w-full px-3 py-2 border border-slate-300 rounded-lg outline-none bg-white" value={paymentForm.paymentMode} onChange={e => setPaymentForm({ ...paymentForm, paymentMode: e.target.value })}><option value="Cash">Cash</option><option value="GPay">GPay</option><option value="Other">Other</option></select></div>
+                                                <Input label="Note" value={paymentForm.note} onChange={e => setPaymentForm({ ...paymentForm, note: e.target.value })} />
+                                                <div className="flex items-end gap-2">
+                                                  <Button variant="success" onClick={editingPaymentId ? handleUpdatePayment : () => handleAddPayment(sale.id)}>{editingPaymentId ? 'Update' : 'Save'}</Button>
+                                                  <Button variant="secondary" onClick={() => { setPayingSaleId(null); setEditingPaymentId(null); setPaymentForm({ amount: '', paymentMode: 'Cash', note: '' }); }}>Cancel</Button>
+                                                </div>
+                                              </div>
+                                            </div>
+                                          </td>
+                                        </tr>
+                                      )}
+                                      {isPayExpanded && (
+                                        <tr className="bg-slate-50">
+                                          <td colSpan="10" className="px-4 py-4">
+                                            <div className="bg-white rounded-lg p-4 border border-slate-200">
+                                              <h4 className="font-semibold text-slate-800 mb-3 flex items-center gap-2"><Wallet size={16} /> Payment History</h4>
+                                              {salePayments.length > 0 ? (
+                                                <table className="w-full text-xs">
+                                                  <thead className="bg-slate-50"><tr><th className="px-3 py-2 text-left">Date</th><th className="px-3 py-2 text-left">Amount</th><th className="px-3 py-2 text-left">Mode</th><th className="px-3 py-2 text-left">Note</th><th className="px-3 py-2 text-right">Actions</th></tr></thead>
+                                                  <tbody className="divide-y divide-slate-100">
+                                                    {salePayments.map(p => (
+                                                      <tr key={p.id} className="hover:bg-slate-50">
+                                                        <td className="px-3 py-2">{p.date}</td>
+                                                        <td className="px-3 py-2 font-medium">₹{parseFloat(p.amount).toFixed(2)}</td>
+                                                        <td className="px-3 py-2"><span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">{p.paymentMode}</span></td>
+                                                        <td className="px-3 py-2 text-slate-500 italic">{p.note || '-'}</td>
+                                                        <td className="px-3 py-2 text-right">
+                                                          <button type="button" onClick={() => handleEditPayment(p.id)} className="text-blue-600 hover:text-blue-800 p-1"><Edit2 size={14} /></button>
+                                                          <button type="button" onClick={() => handleDeletePayment(p.id)} className="text-red-600 hover:text-red-800 p-1"><Trash2 size={14} /></button>
+                                                        </td>
+                                                      </tr>
+                                                    ))}
+                                                  </tbody>
+                                                </table>
+                                              ) : <p className="text-slate-400 italic text-sm">No payment history recorded</p>}
+                                            </div>
+                                          </td>
+                                        </tr>
+                                      )}
+                                    </React.Fragment>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </Card>
+                    );
+                  })
+                )}
+              </div>
+            ) : (
+            <>
             {editingSale && (
               <Card className="mb-4 p-4 bg-slate-50 border-slate-200">
                 <div className="flex justify-between items-center mb-3">
@@ -1499,7 +2217,7 @@ export default function FishStoreApp({ onLogout }) {
 
             <Card className="overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left min-w-[900px]">
+                <table className="w-full text-sm text-left min-w-[1000px]">
                     <thead className="bg-slate-50 text-slate-600 uppercase">
                         <tr>
                             <th className="px-4 py-3">Date</th>
@@ -1510,14 +2228,24 @@ export default function FishStoreApp({ onLogout }) {
                             <th className="px-4 py-3">Weight</th>
                             <th className="px-4 py-3">Price/kg</th>
                             <th className="px-4 py-3">Total</th>
+                            <th className="px-4 py-3">Paid</th>
+                            <th className="px-4 py-3">Pending</th>
                             <th className="px-4 py-3">Pay Mode</th>
                             <th className="px-4 py-3 text-right">Status</th>
                             <th className="px-4 py-3 text-right">Actions</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                        {filteredSales.slice().reverse().map(sale => (
-                            <tr key={sale.id} className="hover:bg-slate-50">
+                        {filteredSales.slice().reverse().map(sale => {
+                          const finalAmt = sale.finalAmount ?? sale.weight * sale.price;
+                          const amountPaid = sale.amountPaid ?? 0;
+                          const amountPending = sale.amountPending ?? finalAmt;
+                          const salePayments = paymentHistory.filter(p => p.saleId === sale.id);
+                          const isPayExpanded = expandedPayments.has(sale.id);
+                          const isPaying = payingSaleId === sale.id;
+                          return (
+                            <React.Fragment key={sale.id}>
+                              <tr className="hover:bg-slate-50">
                                 <td className="px-4 py-3 text-slate-500">{sale.date}</td>
                                 <td className="px-4 py-3 font-medium text-slate-800">{sale.clientName}</td>
                                 <td className="px-4 py-3 text-slate-600">{sale.itemName}</td>
@@ -1528,31 +2256,117 @@ export default function FishStoreApp({ onLogout }) {
                                 </td>
                                 <td className="px-4 py-3">{sale.weight} kg</td>
                                 <td className="px-4 py-3">₹{sale.price}</td>
-                                <td className="px-4 py-3 font-bold text-slate-800">₹{(sale.weight * sale.price).toFixed(2)}</td>
+                                <td className="px-4 py-3 font-bold text-slate-800">₹{finalAmt.toFixed(2)}</td>
+                                <td className="px-4 py-3 text-green-600 font-medium">₹{amountPaid.toFixed(2)}</td>
+                                <td className="px-4 py-3 text-red-600 font-medium">₹{amountPending.toFixed(2)}</td>
                                 <td className="px-4 py-3">{sale.paymentMode || '-'}</td>
                                 <td className="px-4 py-3 text-right">
                                     <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
                                         sale.status === 'Paid' ? 'bg-green-100 text-green-700' : 
-                                        sale.status === 'Pending' ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-600'
+                                        sale.status === 'Pending' ? 'bg-orange-100 text-orange-700' : 
+                                        sale.status === 'Partial' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-600'
                                     }`}>
                                         {sale.status === 'Paid' ? <CheckCircle size={10} /> : <Clock3 size={10} />}
                                         {sale.status}
                                     </span>
                                 </td>
                                 <td className="px-4 py-3 text-right">
-                                    <button
-                                      className="text-slate-500 hover:text-blue-600 p-1"
-                                      onClick={() => startEditSale(sale)}
-                                      title="Edit bill"
-                                    >
-                                      <Edit2 size={14} />
-                                    </button>
+                                    <div className="flex items-center justify-end gap-2">
+                                      {sale.status !== 'Paid' && (
+                                        <Button
+                                          variant="success"
+                                          className="text-xs px-2 py-1"
+                                          onClick={() => {
+                                            setPayingSaleId(sale.id);
+                                            setPaymentForm({ amount: amountPending.toFixed(2), paymentMode: 'Cash', note: '' });
+                                          }}
+                                        >
+                                          Pay
+                                        </Button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        className="text-blue-600 hover:text-blue-800 text-xs px-2 py-1"
+                                        onClick={() => togglePaymentHistory(sale.id)}
+                                      >
+                                        {isPayExpanded ? 'Hide' : 'View'} Payments ({salePayments.length})
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="text-slate-500 hover:text-blue-600 p-1"
+                                        onClick={() => startEditSale(sale)}
+                                        title="Edit bill"
+                                      >
+                                        <Edit2 size={14} />
+                                      </button>
+                                    </div>
                                 </td>
-                            </tr>
-                        ))}
+                              </tr>
+                              {isPaying && (
+                                <tr className="bg-blue-50">
+                                  <td colSpan="13" className="px-4 py-4">
+                                    <div className="bg-white rounded-lg p-4 border border-blue-200">
+                                      <h4 className="font-semibold text-slate-800 mb-3">{editingPaymentId ? 'Edit Payment' : 'Record Payment'}</h4>
+                                      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                        <Input label="Amount (₹)" type="number" step="0.01" value={paymentForm.amount} onChange={e => setPaymentForm({ ...paymentForm, amount: e.target.value })} placeholder={amountPending.toFixed(2)} />
+                                        <div>
+                                          <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Payment Mode</label>
+                                          <select className="w-full px-3 py-2 border border-slate-300 rounded-lg outline-none bg-white" value={paymentForm.paymentMode} onChange={e => setPaymentForm({ ...paymentForm, paymentMode: e.target.value })}>
+                                            <option value="Cash">Cash</option>
+                                            <option value="GPay">GPay</option>
+                                            <option value="Other">Other</option>
+                                          </select>
+                                        </div>
+                                        <Input label="Note" value={paymentForm.note} onChange={e => setPaymentForm({ ...paymentForm, note: e.target.value })} placeholder="Optional note" />
+                                        <div className="flex items-end gap-2">
+                                          <Button variant="success" onClick={editingPaymentId ? handleUpdatePayment : () => handleAddPayment(sale.id)} className="flex-1">{editingPaymentId ? 'Update' : 'Save'}</Button>
+                                          <Button variant="secondary" onClick={() => { setPayingSaleId(null); setEditingPaymentId(null); setPaymentForm({ amount: '', paymentMode: 'Cash', note: '' }); }}>Cancel</Button>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                              {isPayExpanded && (
+                                <tr className="bg-slate-50">
+                                  <td colSpan="13" className="px-4 py-4">
+                                    <div className="bg-white rounded-lg p-4 border border-slate-200">
+                                      <h4 className="font-semibold text-slate-800 mb-3 flex items-center gap-2"><Wallet size={16} /> Payment History</h4>
+                                      {salePayments.length > 0 ? (
+                                        <div className="space-y-2">
+                                          <table className="w-full text-xs">
+                                            <thead className="bg-slate-50"><tr><th className="px-3 py-2 text-left">Date</th><th className="px-3 py-2 text-left">Amount</th><th className="px-3 py-2 text-left">Mode</th><th className="px-3 py-2 text-left">Note</th><th className="px-3 py-2 text-right">Actions</th></tr></thead>
+                                            <tbody className="divide-y divide-slate-100">
+                                              {salePayments.map(p => (
+                                                <tr key={p.id} className="hover:bg-slate-50">
+                                                  <td className="px-3 py-2">{p.date}</td>
+                                                  <td className="px-3 py-2 font-medium">₹{parseFloat(p.amount).toFixed(2)}</td>
+                                                  <td className="px-3 py-2"><span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">{p.paymentMode}</span></td>
+                                                  <td className="px-3 py-2 text-slate-500 italic">{p.note || '-'}</td>
+                                                  <td className="px-3 py-2 text-right">
+                                                    <div className="flex justify-end gap-1">
+                                                      <button type="button" onClick={() => handleEditPayment(p.id)} className="text-blue-600 hover:text-blue-800 p-1" title="Edit"><Edit2 size={14} /></button>
+                                                      <button type="button" onClick={() => handleDeletePayment(p.id)} className="text-red-600 hover:text-red-800 p-1" title="Delete"><Trash2 size={14} /></button>
+                                                    </div>
+                                                  </td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      ) : (
+                                        <p className="text-slate-400 italic text-sm">No payment history recorded</p>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
                         {filteredSales.length === 0 && (
                             <tr>
-                                <td colSpan="10" className="px-4 py-8 text-center text-slate-400 italic">
+                                <td colSpan="13" className="px-4 py-8 text-center text-slate-400 italic">
                                     No sales found for this filter.
                                 </td>
                             </tr>
@@ -1561,6 +2375,8 @@ export default function FishStoreApp({ onLogout }) {
                 </table>
               </div>
             </Card>
+            </>
+            )}
         </div>
       </div>
     );
